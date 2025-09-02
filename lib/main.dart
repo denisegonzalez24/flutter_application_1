@@ -1,5 +1,15 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
+
+// === Configuración de WebSocket ===
+// - Emulador AVD: 'ws://10.0.2.2:13001/ws'
+// - Dispositivo físico: 'ws://<IP_de_tu_PC>:13001/ws'
+const String kWsBase = 'ws://149.56.182.49:13001'; // sin /ws acá
+const String kToken = '123456';
 
 void main() {
   runApp(const MyApp());
@@ -8,27 +18,11 @@ void main() {
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
 
-  // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Demo',
+      title: 'Torch via WebSocket',
       theme: ThemeData(
-        // This is the theme of your application.
-        //
-        // TRY THIS: Try running your application with "flutter run". You'll see
-        // the application has a purple toolbar. Then, without quitting the app,
-        // try changing the seedColor in the colorScheme below to Colors.green
-        // and then invoke "hot reload" (save your changes or press the "hot
-        // reload" button in a Flutter-supported IDE, or press "r" if you used
-        // the command line to start the app).
-        //
-        // Notice that the counter didn't reset back to zero; the application
-        // state is not lost during the reload. To reset the state, use hot
-        // restart instead.
-        //
-        // This works for code too, not just values: Most code changes can be
-        // tested with just a hot reload.
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
       home: const TorchCameraPage(),
@@ -50,17 +44,23 @@ class _TorchCameraPageState extends State<TorchCameraPage>
   bool _torchOn = false;
   String? _error;
 
+  // WebSocket
+  WebSocket? _ws;
+  StreamSubscription? _wsSub;
+  Timer? _reconnectTimer;
+  int _reconnectAttempt = 0;
+  bool _manuallyClosed = false;
+
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initCamera();
+    _initCamera().then((_) => _connectSocket());
   }
 
   Future<void> _initCamera() async {
     try {
       final cameras = await availableCameras();
-      // trasera si existe, sino cualquiera
       _camera = cameras.firstWhere(
         (c) => c.lensDirection == CameraLensDirection.back,
         orElse: () => cameras.first,
@@ -83,40 +83,264 @@ class _TorchCameraPageState extends State<TorchCameraPage>
     }
   }
 
-  Future<void> _toggleTorch() async {
+  Future<void> _setTorch(bool turnOn) async {
     final ctrl = _controller;
     if (ctrl == null || !ctrl.value.isInitialized) return;
+
     try {
-      if (_torchOn) {
-        await ctrl.setFlashMode(FlashMode.off);
-      } else {
-        await ctrl.setFlashMode(FlashMode.torch);
+      await ctrl.setFlashMode(turnOn ? FlashMode.torch : FlashMode.off);
+      if (mounted) {
+        setState(() {
+          _torchOn = turnOn;
+          _error = null;
+        });
       }
-      setState(() => _torchOn = !_torchOn);
     } on CameraException catch (e) {
-      setState(() => _error = 'Error torch: ${e.code} ${e.description ?? ""}');
+      if (mounted) {
+        setState(
+          () => _error = 'Error torch: ${e.code} ${e.description ?? ""}',
+        );
+      }
     } catch (e) {
-      setState(() => _error = 'Error torch: $e');
+      if (mounted) {
+        setState(() => _error = 'Error torch: $e');
+      }
     }
+  }
+
+  // === Helpers WebSocket ===
+  Uri get _socketUri => Uri.parse('$kWsBase/ws');
+
+  void _sendWs(Map<String, dynamic> payload) {
+    try {
+      _ws?.add(json.encode(payload));
+    } catch (_) {
+      // opcional: setear _error
+    }
+  }
+
+  String _genAckId() => 't_${DateTime.now().millisecondsSinceEpoch}';
+
+  /// Envía ACK: { "id":"<mismo id>", "op":"torch", "ok":"true"/"false", "err":"..."? }
+  void _sendTorchAck({
+    required String? requestId,
+    required bool ok,
+    String? err,
+  }) {
+    final ack = <String, dynamic>{
+      "id": requestId ?? _genAckId(), // eco del id recibido
+      "op": "torch",
+      "ok": ok ? "true" : "false",
+    };
+    if (err != null) ack["err"] = err;
+    _sendWs(ack);
+  }
+
+  Future<void> _connectSocket() async {
+    _manuallyClosed = false;
+    _cancelReconnect();
+
+    try {
+      setState(() => _error = null);
+
+      _ws = await WebSocket.connect(
+        _socketUri.toString(),
+        headers: {'Authorization': 'Bearer $kToken'},
+      );
+      _ws?.pingInterval = const Duration(seconds: 20);
+
+      _wsSub = _ws!.listen(
+        _onWsMessage,
+        onDone: _onWsDone,
+        onError: (e) {
+          if (mounted) setState(() => _error = 'WS error: $e');
+          _scheduleReconnect();
+        },
+        cancelOnError: true,
+      );
+    } catch (e) {
+      if (mounted) setState(() => _error = 'No se pudo conectar al WS: $e');
+      _scheduleReconnect();
+    }
+  }
+
+  void _onWsMessage(dynamic data) {
+    try {
+      // Normalizo binario a string
+      if (data is List<int>) {
+        data = utf8.decode(data, allowMalformed: true);
+      }
+
+      if (data is String) {
+        final trimmed = data.trim();
+        dynamic decoded;
+
+        // Intento JSON
+        try {
+          decoded = json.decode(trimmed);
+        } catch (_) {
+          decoded = null;
+        }
+
+        // --- Caso JSON: { "id":"...", "op":"...", ... } ---
+        if (decoded is Map) {
+          final op = decoded["op"];
+          final reqId = decoded["id"] as String?;
+
+          // PING
+          if (op == "ping") {
+            final ts = decoded["ts"];
+            _sendWs({
+              "id": reqId ?? _genAckId(),
+              "op": "ping",
+              "ok": "true",
+              if (ts != null) "ts": ts,
+            });
+            return;
+          }
+
+          // TORCH
+          if (op == "torch") {
+            final val = decoded["on"];
+            bool? desired;
+            if (val is bool) desired = val;
+            if (val is num) desired = val != 0;
+            if (val is String) {
+              final s = val.toLowerCase();
+              if (s == "true" ||
+                  s == "on" ||
+                  s == "1" ||
+                  s == "encender" ||
+                  s == "prender")
+                desired = true;
+              if (s == "false" || s == "off" || s == "0" || s == "apagar")
+                desired = false;
+            }
+
+            if (desired != null) {
+              _setTorch(desired).whenComplete(() {
+                final ok = _error == null;
+                _sendTorchAck(
+                  requestId: reqId,
+                  ok: ok,
+                  err: ok ? null : _error,
+                );
+              });
+            } else {
+              _sendTorchAck(
+                requestId: reqId,
+                ok: false,
+                err: "payload invalido: on",
+              );
+            }
+            return;
+          }
+
+          // OP desconocida
+          _sendWs({
+            "id": reqId ?? _genAckId(),
+            "op": "$op",
+            "ok": "false",
+            "err": "op desconocida",
+          });
+          return;
+        }
+
+        // --- Fallback: texto plano "on"/"off" (para pruebas) ---
+        final norm = trimmed.toLowerCase();
+        if (_isOnWord(norm)) {
+          _setTorch(true).whenComplete(() {
+            _sendTorchAck(requestId: null, ok: _error == null, err: _error);
+          });
+        } else if (_isOffWord(norm)) {
+          _setTorch(false).whenComplete(() {
+            _sendTorchAck(requestId: null, ok: _error == null, err: _error);
+          });
+        } else {
+          if (mounted) setState(() => _error = 'WS msg desconocido: "$data"');
+        }
+      }
+    } catch (e) {
+      if (mounted) setState(() => _error = 'Error parseando WS: $e');
+    }
+  }
+
+  bool _isOnWord(String s) =>
+      s == 'on' ||
+      s == 'encender' ||
+      s == 'prender' ||
+      s == 'true' ||
+      s == '1' ||
+      s == 'torch_on';
+
+  bool _isOffWord(String s) =>
+      s == 'off' ||
+      s == 'apagar' ||
+      s == 'false' ||
+      s == '0' ||
+      s == 'torch_off';
+
+  void _onWsDone() {
+    if (_manuallyClosed) return;
+    _scheduleReconnect();
+  }
+
+  void _scheduleReconnect() {
+    _reconnectAttempt++;
+    final delay = Duration(
+      seconds: _reconnectBackoffSeconds(_reconnectAttempt),
+    );
+    _reconnectTimer?.cancel();
+    _reconnectTimer = Timer(delay, _connectSocket);
+    if (mounted) {
+      setState(() {
+        _error = 'Reconectando WS en ${delay.inSeconds}s...';
+      });
+    }
+  }
+
+  int _reconnectBackoffSeconds(int attempt) {
+    final v = 1 << (attempt - 1); // 1,2,4,8...
+    return v > 10 ? 10 : v; // tope 10s
+  }
+
+  void _cancelReconnect() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectAttempt = 0;
+  }
+
+  Future<void> _closeSocket() async {
+    _manuallyClosed = true;
+    _cancelReconnect();
+    await _wsSub?.cancel();
+    _wsSub = null;
+    try {
+      await _ws?.close();
+    } catch (_) {}
+    _ws = null;
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     final ctrl = _controller;
-    // Libera la cámara si la app se pausa, y la reabre al volver
-    if (ctrl == null || !ctrl.value.isInitialized) return;
+
     if (state == AppLifecycleState.inactive ||
         state == AppLifecycleState.paused) {
-      ctrl.dispose();
-      _controller = null;
+      _closeSocket();
+      if (ctrl != null && ctrl.value.isInitialized) {
+        ctrl.dispose();
+        _controller = null;
+      }
     } else if (state == AppLifecycleState.resumed) {
-      _initCamera();
+      _initCamera().then((_) => _connectSocket());
     }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _closeSocket();
     _controller?.dispose();
     super.dispose();
   }
@@ -126,30 +350,86 @@ class _TorchCameraPageState extends State<TorchCameraPage>
     final ctrl = _controller;
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Torch con camera')),
-      body: Column(
-        children: [
-          if (_error != null)
-            Container(
-              padding: const EdgeInsets.all(12),
-              color: Colors.red.withOpacity(0.1),
-              child: Text(_error!, style: const TextStyle(color: Colors.red)),
+      appBar: AppBar(title: const Text('Torch con WebSocket')),
+      body: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            _StatusTile(
+              label: 'Cámara',
+              value: (ctrl?.value.isInitialized ?? false)
+                  ? 'Inicializada'
+                  : 'No lista',
             ),
-          const SizedBox(height: 8),
+            const SizedBox(height: 8),
+            _StatusTile(
+              label: 'Linterna',
+              value: _torchOn ? 'Encendida' : 'Apagada',
+            ),
+            const SizedBox(height: 8),
+            _StatusTile(
+              label: 'WS URL',
+              value: _socketUri.toString(),
+              monospace: true,
+            ),
+            const SizedBox(height: 8),
+            if (_error != null)
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.red.withOpacity(0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.red.withOpacity(0.3)),
+                ),
+                child: Text(_error!, style: const TextStyle(color: Colors.red)),
+              ),
+            const Spacer(),
+            Center(
+              child: ElevatedButton.icon(
+                onPressed: (ctrl == null || !ctrl.value.isInitialized)
+                    ? null
+                    : () => _setTorch(!_torchOn),
+                icon: Icon(
+                  _torchOn ? Icons.flashlight_off : Icons.flashlight_on,
+                ),
+                label: Text(_torchOn ? 'Apagar (manual)' : 'Prender (manual)'),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
-          const SizedBox(height: 8),
-          Padding(
-            padding: const EdgeInsets.only(bottom: 16),
-            child: ElevatedButton.icon(
-              onPressed: (ctrl == null || !ctrl.value.isInitialized)
-                  ? null
-                  : _toggleTorch,
-              icon: Icon(_torchOn ? Icons.flashlight_off : Icons.flashlight_on),
-              label: Text(_torchOn ? 'Apagar linterna' : 'Prender linterna'),
+class _StatusTile extends StatelessWidget {
+  final String label;
+  final String value;
+  final bool monospace;
+  const _StatusTile({
+    required this.label,
+    required this.value,
+    this.monospace = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Text('$label: ', style: const TextStyle(fontWeight: FontWeight.w600)),
+        Expanded(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            style: TextStyle(
+              fontFamily: monospace ? 'monospace' : null,
+              color: Colors.black87,
             ),
           ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }
