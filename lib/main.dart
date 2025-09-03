@@ -8,10 +8,13 @@ import 'package:camera/camera.dart';
 // === Configuración de WebSocket ===
 // - Emulador AVD: 'ws://10.0.2.2:13001/ws'
 // - Dispositivo físico: 'ws://<IP_de_tu_PC>:13001/ws'
-const String kWsBase = 'ws://149.56.182.49:13001'; // sin /ws acá
+// - Tu server público (TLS):
+const String kWsBase = 'wss://node2.liit.com.ar'; // sin /ws acá
 const String kToken = '123456';
 
-void main() {
+void main() async {
+  // Evita issues de lifecycle/plugins en arranque
+  WidgetsFlutterBinding.ensureInitialized();
   runApp(const MyApp());
 }
 
@@ -55,8 +58,14 @@ class _TorchCameraPageState extends State<TorchCameraPage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    _initCamera().then((_) => _connectSocket());
+
+    // Inicializar cámara después del primer frame
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _initCamera().then((_) => _connectSocket());
+    });
   }
+
+  Uri get _socketUri => Uri.parse('$kWsBase/ws');
 
   Future<void> _initCamera() async {
     try {
@@ -108,38 +117,37 @@ class _TorchCameraPageState extends State<TorchCameraPage>
     }
   }
 
-  // === Helpers WebSocket ===
-  Uri get _socketUri => Uri.parse('$kWsBase/ws');
+  // ---- WebSocket helpers ----
 
   void _sendWs(Map<String, dynamic> payload) {
+    final ws = _ws;
+    if (ws == null) return; // evita "Cannot send Null"
     try {
-      _ws?.add(json.encode(payload));
-    } catch (_) {
-      // opcional: setear _error
+      ws.add(json.encode(payload));
+    } catch (e) {
+      setState(() => _error = 'WS send error: $e');
     }
   }
 
   String _genAckId() => 't_${DateTime.now().millisecondsSinceEpoch}';
 
-  /// Envía ACK: { "id":"<mismo id>", "op":"torch", "ok":"true"/"false", "err":"..."? }
   void _sendTorchAck({
     required String? requestId,
     required bool ok,
     String? err,
   }) {
     final ack = <String, dynamic>{
-      "id": requestId ?? _genAckId(), // eco del id recibido
+      "id": requestId ?? _genAckId(), // eco del id del request
       "op": "torch",
       "ok": ok ? "true" : "false",
+      if (err != null) "err": err,
     };
-    if (err != null) ack["err"] = err;
     _sendWs(ack);
   }
 
   Future<void> _connectSocket() async {
     _manuallyClosed = false;
     _cancelReconnect();
-
     try {
       setState(() => _error = null);
 
@@ -166,99 +174,93 @@ class _TorchCameraPageState extends State<TorchCameraPage>
 
   void _onWsMessage(dynamic data) {
     try {
-      // Normalizo binario a string
+      // Normalizar binario a string
       if (data is List<int>) {
         data = utf8.decode(data, allowMalformed: true);
       }
 
-      if (data is String) {
-        final trimmed = data.trim();
-        dynamic decoded;
+      if (data is! String) return;
+      final trimmed = data.trim();
+      dynamic decoded;
 
-        // Intento JSON
-        try {
-          decoded = json.decode(trimmed);
-        } catch (_) {
-          decoded = null;
-        }
+      try {
+        decoded = json.decode(trimmed);
+      } catch (_) {
+        decoded = null;
+      }
 
-        // --- Caso JSON: { "id":"...", "op":"...", ... } ---
-        if (decoded is Map) {
-          final op = decoded["op"];
-          final reqId = decoded["id"] as String?;
+      // --- Caso JSON: { "id":"...", "op":"...", ... } ---
+      if (decoded is Map) {
+        final op = decoded["op"];
+        final reqId = decoded["id"] as String?;
 
-          // PING
-          if (op == "ping") {
-            final ts = decoded["ts"];
-            _sendWs({
-              "id": reqId ?? _genAckId(),
-              "op": "ping",
-              "ok": "true",
-              if (ts != null) "ts": ts,
-            });
-            return;
-          }
-
-          // TORCH
-          if (op == "torch") {
-            final val = decoded["on"];
-            bool? desired;
-            if (val is bool) desired = val;
-            if (val is num) desired = val != 0;
-            if (val is String) {
-              final s = val.toLowerCase();
-              if (s == "true" ||
-                  s == "on" ||
-                  s == "1" ||
-                  s == "encender" ||
-                  s == "prender")
-                desired = true;
-              if (s == "false" || s == "off" || s == "0" || s == "apagar")
-                desired = false;
-            }
-
-            if (desired != null) {
-              _setTorch(desired).whenComplete(() {
-                final ok = _error == null;
-                _sendTorchAck(
-                  requestId: reqId,
-                  ok: ok,
-                  err: ok ? null : _error,
-                );
-              });
-            } else {
-              _sendTorchAck(
-                requestId: reqId,
-                ok: false,
-                err: "payload invalido: on",
-              );
-            }
-            return;
-          }
-
-          // OP desconocida
+        // PING
+        if (op == "ping") {
+          final ts = decoded["ts"];
           _sendWs({
             "id": reqId ?? _genAckId(),
-            "op": "$op",
-            "ok": "false",
-            "err": "op desconocida",
+            "op": "ping",
+            "ok": "true",
+            if (ts != null) "ts": ts,
           });
           return;
         }
 
-        // --- Fallback: texto plano "on"/"off" (para pruebas) ---
-        final norm = trimmed.toLowerCase();
-        if (_isOnWord(norm)) {
-          _setTorch(true).whenComplete(() {
-            _sendTorchAck(requestId: null, ok: _error == null, err: _error);
-          });
-        } else if (_isOffWord(norm)) {
-          _setTorch(false).whenComplete(() {
-            _sendTorchAck(requestId: null, ok: _error == null, err: _error);
-          });
-        } else {
-          if (mounted) setState(() => _error = 'WS msg desconocido: "$data"');
+        // TORCH
+        if (op == "torch") {
+          final val = decoded["on"];
+          bool? desired;
+          if (val is bool) desired = val;
+          if (val is num) desired = val != 0;
+          if (val is String) {
+            final s = val.toLowerCase();
+            if (s == "true" ||
+                s == "on" ||
+                s == "1" ||
+                s == "encender" ||
+                s == "prender")
+              desired = true;
+            if (s == "false" || s == "off" || s == "0" || s == "apagar")
+              desired = false;
+          }
+
+          if (desired != null) {
+            _setTorch(desired).whenComplete(() {
+              final ok = _error == null;
+              _sendTorchAck(requestId: reqId, ok: ok, err: ok ? null : _error);
+            });
+          } else {
+            _sendTorchAck(
+              requestId: reqId,
+              ok: false,
+              err: "payload invalido: on",
+            );
+          }
+          return;
         }
+
+        // OP desconocida
+        _sendWs({
+          "id": reqId ?? _genAckId(),
+          "op": "$op",
+          "ok": "false",
+          "err": "op desconocida",
+        });
+        return;
+      }
+
+      // --- Fallback: texto plano "on"/"off" (para pruebas) ---
+      final norm = trimmed.toLowerCase();
+      if (_isOnWord(norm)) {
+        _setTorch(true).whenComplete(() {
+          _sendTorchAck(requestId: null, ok: _error == null, err: _error);
+        });
+      } else if (_isOffWord(norm)) {
+        _setTorch(false).whenComplete(() {
+          _sendTorchAck(requestId: null, ok: _error == null, err: _error);
+        });
+      } else {
+        if (mounted) setState(() => _error = 'WS msg desconocido: "$data"');
       }
     } catch (e) {
       if (mounted) setState(() => _error = 'Error parseando WS: $e');
