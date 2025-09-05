@@ -218,10 +218,12 @@ class _TorchCameraPageState extends State<TorchCameraPage>
                 s == "on" ||
                 s == "1" ||
                 s == "encender" ||
-                s == "prender")
+                s == "prender") {
               desired = true;
-            if (s == "false" || s == "off" || s == "0" || s == "apagar")
+            }
+            if (s == "false" || s == "off" || s == "0" || s == "apagar") {
               desired = false;
+            }
           }
 
           if (desired != null) {
@@ -249,14 +251,14 @@ class _TorchCameraPageState extends State<TorchCameraPage>
         return;
       }
 
-      // --- Fallback: texto plano "on"/"off" (para pruebas) ---
+      // --- Fallback: texto plano (para pruebas) ---
+      // Soporta: "on", "off", "encender", "apagar", "true", "false",
+      //          "1", "0", y también "torch on: false"/"torch on: true"
       final norm = trimmed.toLowerCase();
-      if (_isOnWord(norm)) {
-        _setTorch(true).whenComplete(() {
-          _sendTorchAck(requestId: null, ok: _error == null, err: _error);
-        });
-      } else if (_isOffWord(norm)) {
-        _setTorch(false).whenComplete(() {
+      final desired = _parseDesiredFromText(norm);
+
+      if (desired != null) {
+        _setTorch(desired).whenComplete(() {
           _sendTorchAck(requestId: null, ok: _error == null, err: _error);
         });
       } else {
@@ -281,6 +283,24 @@ class _TorchCameraPageState extends State<TorchCameraPage>
       s == 'false' ||
       s == '0' ||
       s == 'torch_off';
+
+  /// Nuevo: interpreta texto libre tipo "torch on: false", "on=false",
+  /// o directamente palabras sueltas ("on", "off", "true", "false", "1", "0").
+  bool? _parseDesiredFromText(String s) {
+    // Busca patrón on:=<valor>
+    final m = RegExp(r'on\s*[:=]\s*([A-Za-z0-9_]+)').firstMatch(s);
+    if (m != null) {
+      final v = m.group(1)!.toLowerCase();
+      if (_isOnWord(v)) return true;
+      if (_isOffWord(v)) return false;
+    }
+
+    // Fallback: si todo el string es una palabra conocida
+    if (_isOnWord(s)) return true;
+    if (_isOffWord(s)) return false;
+
+    return null;
+  }
 
   void _onWsDone() {
     if (_manuallyClosed) return;
