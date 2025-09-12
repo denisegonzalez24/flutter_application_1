@@ -1,4 +1,12 @@
 import 'dart:convert';
+import 'dart:async';  
+import 'package:flutter/foundation.dart';
+import 'package:camera/camera.dart'; 
+import 'dart:io';
+
+
+
+
 void _onWsText(String data) {
 try {
 final trimmed = data.trim();
@@ -10,6 +18,8 @@ try { decoded = json.decode(trimmed); } catch (_) { decoded = null; }
 if (decoded is Map) {
 final op = decoded['op'];
 final reqId = decoded['id'] as String?;
+
+
 
 
 if (op == 'ping') {
