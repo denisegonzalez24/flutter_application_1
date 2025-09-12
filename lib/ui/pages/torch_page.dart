@@ -1,8 +1,8 @@
+// lib/ui/pages/torch_page.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_application_1/ui/widgets/status_title.dart';
 
 import '../../controllers/torch_controller.dart';
-import '../widgets/status_tile.dart';
 
 class TorchPage extends StatefulWidget {
   const TorchPage({super.key});
@@ -19,9 +19,10 @@ class _TorchPageState extends State<TorchPage> with WidgetsBindingObserver {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     ctrl = TorchController();
-    WidgetsBinding.instance.addPostFrameCallback((_) async {
-      await ctrl.init();
-      if (mounted) setState(() {});
+    // Arranque
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ctrl.init();
+      setState(() {}); // para pintar URL, etc.
     });
   }
 
@@ -30,6 +31,11 @@ class _TorchPageState extends State<TorchPage> with WidgetsBindingObserver {
     WidgetsBinding.instance.removeObserver(this);
     ctrl.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Si quisieras pausar la cámara/ws aquí, podés extender el controller.
   }
 
   @override
@@ -43,7 +49,7 @@ class _TorchPageState extends State<TorchPage> with WidgetsBindingObserver {
           children: [
             ValueListenableBuilder<bool>(
               valueListenable: ctrl.cameraReady,
-              builder: (context, ready, _) => StatusTile(
+              builder: (_, ready, __) => StatusTile(
                 label: 'Cámara',
                 value: ready ? 'Inicializada' : 'No lista',
               ),
@@ -51,17 +57,22 @@ class _TorchPageState extends State<TorchPage> with WidgetsBindingObserver {
             const SizedBox(height: 8),
             ValueListenableBuilder<bool>(
               valueListenable: ctrl.torchOn,
-              builder: (context, on, _) => StatusTile(
+              builder: (_, on, __) => StatusTile(
                 label: 'Linterna',
                 value: on ? 'Encendida' : 'Apagada',
               ),
+            ),
+            ValueListenableBuilder<String?>(
+              valueListenable: ctrl.wsText,
+              builder: (_, on, __) =>
+                  StatusTile(label: on ?? 'asd', value: on ?? 'asd'),
             ),
             const SizedBox(height: 8),
             StatusTile(label: 'WS URL', value: ctrl.wsUrl, monospace: true),
             const SizedBox(height: 8),
             ValueListenableBuilder<String?>(
               valueListenable: ctrl.errorText,
-              builder: (context, err, _) => err == null
+              builder: (_, err, __) => err == null
                   ? const SizedBox.shrink()
                   : Container(
                       width: double.infinity,
@@ -81,15 +92,15 @@ class _TorchPageState extends State<TorchPage> with WidgetsBindingObserver {
             Center(
               child: ValueListenableBuilder<bool>(
                 valueListenable: ctrl.torchOn,
-                builder: (context, on, _) => ElevatedButton.icon(
-                  onPressed: () {
-                    ctrl.camera.setTorch(!on).whenComplete(() {
-                      ctrl.torchOn.value = ctrl.camera.torchOn;
-                      if (ctrl.camera.lastError != null) {
-                        ctrl.errorText.value = ctrl.camera.lastError;
-                      }
-                    });
-                  },
+                builder: (_, on, __) => ElevatedButton.icon(
+                  onPressed: !ctrl.camera.isReady
+                      ? null
+                      : () => ctrl.camera.setTorch(!on).whenComplete(() {
+                          ctrl.torchOn.value = ctrl.camera.torchOn;
+                          if (ctrl.camera.lastError != null) {
+                            ctrl.errorText.value = ctrl.camera.lastError;
+                          }
+                        }),
                   icon: Icon(on ? Icons.flashlight_off : Icons.flashlight_on),
                   label: Text(on ? 'Apagar (manual)' : 'Prender (manual)'),
                 ),
@@ -101,4 +112,3 @@ class _TorchPageState extends State<TorchPage> with WidgetsBindingObserver {
     );
   }
 }
-s

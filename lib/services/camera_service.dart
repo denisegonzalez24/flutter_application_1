@@ -1,68 +1,55 @@
-// lib/services/ws_client.dart
-(data) {
-if (data is List<int>) {
-try {
-data = utf8.decode(data, allowMalformed: true);
-} catch (_) {
-return;
-}
-}
-if (data is String) onText?.call(data);
-},
-onDone: _handleDone,
-onError: (e) {
-onError?.call(e);
-_scheduleReconnect();
-},
-cancelOnError: true,
-);
-} catch (e) {
-onError?.call(e);
-_scheduleReconnect();
-}
-}
+// lib/services/camera_service.dart
+import 'package:camera/camera.dart';
 
+/// Encapsula el manejo de cámara/linterna.
+class CameraService {
+  CameraController? _controller;
+  bool torchOn = false;
+  String? lastError;
 
-void sendJson(Map<String, dynamic> payload) {
-final socket = _ws;
-if (socket == null) return; // evita "Cannot send Null"
-try {
-socket.add(jsonEncode(payload));
-} catch (e) {
-onError?.call(e);
-}
-}
+  CameraController? get controller => _controller;
+  bool get isReady => _controller?.value.isInitialized ?? false;
 
+  Future<void> init() async {
+    lastError = null;
+    try {
+      final cameras = await availableCameras();
+      final cam = cameras.firstWhere(
+        (c) => c.lensDirection == CameraLensDirection.back,
+        orElse: () => cameras.first,
+      );
+      final ctrl = CameraController(
+        cam,
+        ResolutionPreset.low,
+        enableAudio: false,
+      );
+      await ctrl.initialize();
+      _controller = ctrl;
+    } on CameraException catch (e) {
+      lastError = 'CameraException: ${e.code} ${e.description ?? ''}';
+      rethrow;
+    } catch (e) {
+      lastError = 'Camera init error: $e';
+      rethrow;
+    }
+  }
 
-void _handleDone() {
-if (_manualClose) return;
-_scheduleReconnect();
-onDisconnected?.call();
-}
+  Future<void> setTorch(bool on) async {
+    final ctrl = _controller;
+    if (ctrl == null || !ctrl.value.isInitialized) return;
+    lastError = null;
+    try {
+      await ctrl.setFlashMode(on ? FlashMode.torch : FlashMode.off);
+      torchOn = on;
+    } on CameraException catch (e) {
+      lastError = 'Torch error: ${e.code} ${e.description ?? ''}';
+    } catch (e) {
+      lastError = 'Torch error: $e';
+    }
+  }
 
-
-void _scheduleReconnect() {
-_attempt++;
-final seconds = _attempt >= 1 ? (1 << (_attempt - 1)) : 1; // 1,2,4,8...
-final delay = Duration(seconds: seconds > maxBackoffSeconds ? maxBackoffSeconds : seconds);
-_reconnectTimer?.cancel();
-_reconnectTimer = Timer(delay, connect);
-}
-
-
-void _cancelReconnect() {
-_reconnectTimer?.cancel();
-_reconnectTimer = null;
-_attempt = 0;
-}
-
-
-Future<void> close() async {
-_manualClose = true;
-_cancelReconnect();
-await _sub?.cancel();
-_sub = null;
-try { await _ws?.close(); } catch (_) {}
-_ws = null;
-}
+  Future<void> dispose() async {
+    await _controller?.dispose();
+    _controller = null;
+  }
 }
