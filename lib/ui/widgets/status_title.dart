@@ -1,3 +1,4 @@
+// lib/ui/widgets/status_tile.dart
 import 'package:flutter/material.dart';
 
 class StatusTile extends StatelessWidget {

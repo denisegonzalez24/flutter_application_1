@@ -1,31 +1,24 @@
+// lib/controllers/torch_controller.dart
 import 'dart:convert';
-import 'dart:async';  
-import 'package:flutter/foundation.dart';
-import 'package:camera/camera.dart'; 
-import 'dart:io';
 
 
-
-
-void _onWsText(String data) {
 try {
 final trimmed = data.trim();
 dynamic decoded;
 try { decoded = json.decode(trimmed); } catch (_) { decoded = null; }
 
 
-// JSON { id, op, ... }
 if (decoded is Map) {
 final op = decoded['op'];
 final reqId = decoded['id'] as String?;
-
-
 
 
 if (op == 'ping') {
 _sendPingEcho(requestId: reqId, ts: decoded['ts']);
 return;
 }
+
+
 if (op == 'torch') {
 final val = decoded['on'];
 bool? desired;
@@ -39,9 +32,11 @@ if (s == 'false' || s == 'off' || s == '0' || s == 'apagar') desired = false;
 
 
 if (desired != null) {
-_camera.setTorch(desired).whenComplete(() {
-final ok = _camera.lastError.value == null;
-_sendTorchAck(requestId: reqId, ok: ok, err: ok ? null : _camera.lastError.value);
+camera.setTorch(desired).whenComplete(() {
+final ok = camera.lastError == null;
+torchOn.value = camera.torchOn;
+_sendTorchAck(requestId: reqId, ok: ok, err: ok ? null : camera.lastError);
+if (!ok) errorText.value = camera.lastError;
 });
 } else {
 _sendTorchAck(requestId: reqId, ok: false, err: 'payload invalido: on');
@@ -51,7 +46,7 @@ return;
 
 
 // OP desconocida
-_ws.sendJson({
+ws.sendJson({
 'id': reqId ?? _genAckId(),
 'op': '$op',
 'ok': 'false',
@@ -61,15 +56,15 @@ return;
 }
 
 
-// Fallback texto plano "on"/"off"
+// Texto plano
 final norm = trimmed.toLowerCase();
-if (_isOnWord(norm)) {
-_camera.setTorch(true).whenComplete(() {
-_sendTorchAck(requestId: null, ok: _camera.lastError.value == null, err: _camera.lastError.value);
-});
-} else if (_isOffWord(norm)) {
-_camera.setTorch(false).whenComplete(() {
-_sendTorchAck(requestId: null, ok: _camera.lastError.value == null, err: _camera.lastError.value);
+final desired = _parseDesiredFromText(norm);
+if (desired != null) {
+camera.setTorch(desired).whenComplete(() {
+final ok = camera.lastError == null;
+torchOn.value = camera.torchOn;
+_sendTorchAck(requestId: null, ok: ok, err: ok ? null : camera.lastError);
+if (!ok) errorText.value = camera.lastError;
 });
 } else {
 errorText.value = 'WS msg desconocido: "$data"';

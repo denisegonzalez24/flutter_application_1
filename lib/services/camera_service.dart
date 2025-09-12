@@ -1,4 +1,5 @@
 // lib/services/ws_client.dart
+(data) {
 if (data is List<int>) {
 try {
 data = utf8.decode(data, allowMalformed: true);

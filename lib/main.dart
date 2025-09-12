@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'ui/pages/torch_camera_page.dart';
+import 'ui/pages/torch_page.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,7 +16,7 @@ class MyApp extends StatelessWidget {
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
-      home: const TorchCameraPage(),
+      home: const TorchPage(),
     );
   }
 }
